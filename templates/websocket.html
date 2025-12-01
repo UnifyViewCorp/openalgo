@@ -1,0 +1,278 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-6">
+    <h1 class="text-3xl font-bold mb-6">WebSocket Data</h1>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Search & Subscribe -->
+        <div class="card bg-base-100 shadow-xl lg:col-span-1">
+            <div class="card-body">
+                <h2 class="card-title">Add Symbol</h2>
+                <div class="form-control w-full">
+                    <label class="label">
+                        <span class="label-text">Search Symbol</span>
+                    </label>
+                    <div class="flex gap-2">
+                        <input type="text" id="symbol-search" placeholder="e.g. RELIANCE" class="input input-bordered w-full" onkeypress="handleEnter(event)" />
+                        <button onclick="searchSymbols()" class="btn btn-primary">Search</button>
+                    </div>
+                </div>
+                
+                <div id="search-results" class="mt-4 space-y-2 max-h-96 overflow-y-auto">
+                    <!-- Results will appear here -->
+                    <div class="text-center text-base-content/50 py-4">Search for symbols to subscribe</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Subscribed Symbols -->
+        <div class="card bg-base-100 shadow-xl lg:col-span-2">
+            <div class="card-body">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="card-title">Live Data</h2>
+                    <div class="flex gap-2 items-center">
+                        <span id="connection-status" class="badge badge-error">Disconnected</span>
+                        <button onclick="refreshSubscriptions()" class="btn btn-sm btn-ghost btn-circle" title="Refresh List">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="overflow-x-auto">
+                    <table class="table w-full">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th class="text-right">Price</th>
+                                <th class="text-right">Change</th>
+                                <th class="text-right">Volume</th>
+                                <th class="text-right">Last Update</th>
+                                <th class="text-center">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="subscriptions-table">
+                            <!-- Subscriptions will appear here -->
+                            <tr>
+                                <td colspan="6" class="text-center py-4 text-base-content/50">No subscriptions active</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const socket = io();
+    const subscriptions = new Set();
+    const marketData = {};
+
+    // Socket.IO Connection Handling
+    socket.on('connect', () => {
+        document.getElementById('connection-status').className = 'badge badge-success';
+        document.getElementById('connection-status').textContent = 'Connected';
+        refreshSubscriptions();
+    });
+
+    socket.on('disconnect', () => {
+        document.getElementById('connection-status').className = 'badge badge-error';
+        document.getElementById('connection-status').textContent = 'Disconnected';
+    });
+
+    socket.on('market_data', (data) => {
+        // data format: { symbol: { ltp: 100, ... } } or just { ltp: 100, ... } with symbol in it?
+        // Assuming data is a dictionary of symbol -> tick data
+        
+        // If data comes as a single tick with symbol inside
+        if (data.symbol) {
+            // Construct symbol key to match subscription format
+            const symbolKey = data.exchange ? `${data.exchange}:${data.symbol}` : data.symbol;
+            updateTicker(symbolKey, data);
+        } else {
+            // If data is a dict of symbols
+            for (const [symbol, tick] of Object.entries(data)) {
+                updateTicker(symbol, tick);
+            }
+        }
+    });
+
+    function updateTicker(symbolKey, tick) {
+        if (!subscriptions.has(symbolKey)) return;
+        
+        marketData[symbolKey] = { ...marketData[symbolKey], ...tick };
+        
+        const row = document.getElementById(`row-${symbolKey.replace(/[^a-zA-Z0-9]/g, '_')}`);
+        if (row) {
+            const priceCell = row.querySelector('.price');
+            const changeCell = row.querySelector('.change');
+            const volumeCell = row.querySelector('.volume');
+            const timeCell = row.querySelector('.time');
+            
+            if (tick.ltp) {
+                const oldPrice = parseFloat(priceCell.textContent) || 0;
+                priceCell.textContent = tick.ltp.toFixed(2);
+                priceCell.className = `price text-right font-mono ${tick.ltp > oldPrice ? 'text-success' : (tick.ltp < oldPrice ? 'text-error' : '')}`;
+            }
+            
+            // Calculate change if we have close price or if provided
+            // This depends on what data the broker sends. Assuming we might get change or close.
+            
+            if (tick.volume) volumeCell.textContent = tick.volume.toLocaleString();
+            timeCell.textContent = new Date().toLocaleTimeString();
+        }
+    }
+
+    function handleEnter(e) {
+        if (e.key === 'Enter') searchSymbols();
+    }
+
+    async function searchSymbols() {
+        const query = document.getElementById('symbol-search').value;
+        if (!query) return;
+        
+        const btn = document.querySelector('button[onclick="searchSymbols()"]');
+        const originalText = btn.textContent;
+        btn.textContent = '...';
+        btn.disabled = true;
+        
+        try {
+            const response = await fetch(`/websocket/search?q=${encodeURIComponent(query)}`);
+            const results = await response.json();
+            
+            const container = document.getElementById('search-results');
+            container.innerHTML = '';
+            
+            if (results.length === 0) {
+                container.innerHTML = '<div class="text-center text-base-content/50 py-4">No results found</div>';
+            } else {
+                results.forEach(r => {
+                    const div = document.createElement('div');
+                    div.className = 'flex justify-between items-center p-3 bg-base-200 rounded-lg hover:bg-base-300 transition-colors';
+                    div.innerHTML = `
+                        <div>
+                            <div class="font-bold">${r.symbol}</div>
+                            <div class="text-xs opacity-70">${r.exchange} - ${r.name}</div>
+                        </div>
+                        <button onclick="subscribe('${r.symbol}', '${r.token}', '${r.exchange}')" class="btn btn-sm btn-primary btn-outline">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+                        </button>
+                    `;
+                    container.appendChild(div);
+                });
+            }
+        } catch (e) {
+            console.error(e);
+        } finally {
+            btn.textContent = originalText;
+            btn.disabled = false;
+        }
+    }
+
+    async function subscribe(symbol, token, exchange) {
+        // Format symbol as expected by the backend (e.g., exchange:symbol or just symbol)
+        // The backend subscribe_to_symbols expects a list of symbols.
+        // Depending on the broker, it might need token or symbol.
+        // Let's assume we pass the symbol string that the backend expects.
+        // Usually it's "EXCHANGE:SYMBOL" or just "SYMBOL".
+        // Let's try sending "EXCHANGE:SYMBOL" format if exchange is present.
+        
+        const symbolString = exchange ? `${exchange}:${symbol}` : symbol;
+        
+        try {
+            const response = await fetch('/websocket/subscribe', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': document.querySelector('meta[name="csrf-token"]').content
+                },
+                body: JSON.stringify({ symbols: [symbolString] })
+            });
+            
+            if (response.ok) {
+                refreshSubscriptions();
+                // Clear search
+                // document.getElementById('symbol-search').value = '';
+                // document.getElementById('search-results').innerHTML = '';
+            } else {
+                const data = await response.json();
+                alert('Error subscribing: ' + (data.message || data.error));
+            }
+        } catch (e) {
+            console.error(e);
+            alert('Error subscribing');
+        }
+    }
+
+    async function unsubscribe(symbol) {
+        if (!confirm(`Unsubscribe from ${symbol}?`)) return;
+        
+        try {
+            const response = await fetch('/websocket/unsubscribe', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': document.querySelector('meta[name="csrf-token"]').content
+                },
+                body: JSON.stringify({ symbols: [symbol] })
+            });
+            
+            if (response.ok) {
+                refreshSubscriptions();
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    }
+
+    async function refreshSubscriptions() {
+        try {
+            const response = await fetch('/websocket/subscriptions');
+            const data = await response.json();
+            
+            const tbody = document.getElementById('subscriptions-table');
+            tbody.innerHTML = '';
+            subscriptions.clear();
+            
+            // data.subscriptions should be the list
+            const subs = data.subscriptions || [];
+            
+            if (subs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4 text-base-content/50">No subscriptions active</td></tr>';
+                return;
+            }
+            
+            subs.forEach(s => {
+                // s is {exchange: 'NSE', symbol: 'RELIANCE', mode: 'Quote'}
+                // Construct a unique key
+                const symbolKey = s.exchange ? `${s.exchange}:${s.symbol}` : s.symbol;
+                
+                subscriptions.add(symbolKey);
+                const rowId = `row-${symbolKey.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                const tr = document.createElement('tr');
+                tr.id = rowId;
+                tr.innerHTML = `
+                    <td class="font-bold">${s.symbol} <span class="text-xs opacity-50 ml-1">${s.exchange || ''}</span></td>
+                    <td class="price text-right font-mono">-</td>
+                    <td class="change text-right font-mono">-</td>
+                    <td class="volume text-right font-mono">-</td>
+                    <td class="time text-right text-sm opacity-70">-</td>
+                    <td class="text-center">
+                        <button onclick="unsubscribe('${symbolKey}')" class="btn btn-ghost btn-xs text-error">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+            
+        } catch (e) {
+            console.error(e);
+        }
+    }
+    
+    // Initial load
+    refreshSubscriptions();
+</script>
+{% endblock %}
